@@ -2,7 +2,6 @@
 
 import { startTransition, useMemo, useOptimistic, useState } from 'react';
 
-import { saveChatModelAsCookie } from '@/app/(chat)/actions';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -14,27 +13,18 @@ import { chatModels } from '@/lib/ai/models';
 import { cn } from '@/lib/utils';
 
 import { CheckCircleFillIcon, ChevronDownIcon } from './icons';
-import { entitlementsByUserType } from '@/lib/ai/entitlements';
-import type { Session } from 'next-auth';
 
 export function ModelSelector({
-  session,
   selectedModelId,
   className,
 }: {
-  session: Session;
   selectedModelId: string;
 } & React.ComponentProps<typeof Button>) {
   const [open, setOpen] = useState(false);
   const [optimisticModelId, setOptimisticModelId] =
     useOptimistic(selectedModelId);
 
-  const userType = session.user.type;
-  const { availableChatModelIds } = entitlementsByUserType[userType];
-
-  const availableChatModels = chatModels.filter((chatModel) =>
-    availableChatModelIds.includes(chatModel.id),
-  );
+  const availableChatModels = chatModels;
 
   const selectedChatModel = useMemo(
     () =>
@@ -75,7 +65,6 @@ export function ModelSelector({
 
                 startTransition(() => {
                   setOptimisticModelId(id);
-                  saveChatModelAsCookie(id);
                 });
               }}
               data-active={id === optimisticModelId}

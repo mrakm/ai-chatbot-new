@@ -3,7 +3,6 @@ import 'server-only';
 import {
   and,
   asc,
-  count,
   desc,
   eq,
   gt,
@@ -16,9 +15,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
 import {
-  user,
   chat,
-  type User,
   document,
   type Suggestion,
   suggestion,
@@ -30,55 +27,12 @@ import {
 } from './schema';
 import type { ArtifactKind } from '@/components/artifact';
 import { generateUUID } from '../utils';
-import { generateHashedPassword } from './utils';
 import type { VisibilityType } from '@/components/visibility-selector';
 import { ChatSDKError } from '../errors';
-
-// Optionally, if not using email/pass login, you can
-// use the Drizzle adapter for Auth.js / NextAuth
-// https://authjs.dev/reference/adapter/drizzle
 
 // biome-ignore lint: Forbidden non-null assertion.
 const client = postgres(process.env.POSTGRES_URL!);
 const db = drizzle(client);
-
-export async function getUser(email: string): Promise<Array<User>> {
-  try {
-    return await db.select().from(user).where(eq(user.email, email));
-  } catch (error) {
-    throw new ChatSDKError(
-      'bad_request:database',
-      'Failed to get user by email',
-    );
-  }
-}
-
-export async function createUser(email: string, password: string) {
-  const hashedPassword = generateHashedPassword(password);
-
-  try {
-    return await db.insert(user).values({ email, password: hashedPassword });
-  } catch (error) {
-    throw new ChatSDKError('bad_request:database', 'Failed to create user');
-  }
-}
-
-export async function createGuestUser() {
-  const email = `guest-${Date.now()}`;
-  const password = generateHashedPassword(generateUUID());
-
-  try {
-    return await db.insert(user).values({ email, password }).returning({
-      id: user.id,
-      email: user.email,
-    });
-  } catch (error) {
-    throw new ChatSDKError(
-      'bad_request:database',
-      'Failed to create guest user',
-    );
-  }
-}
 
 export async function saveChat({
   id,
@@ -101,101 +55,6 @@ export async function saveChat({
     });
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to save chat');
-  }
-}
-
-export async function deleteChatById({ id }: { id: string }) {
-  try {
-    await db.delete(vote).where(eq(vote.chatId, id));
-    await db.delete(message).where(eq(message.chatId, id));
-    await db.delete(stream).where(eq(stream.chatId, id));
-
-    const [chatsDeleted] = await db
-      .delete(chat)
-      .where(eq(chat.id, id))
-      .returning();
-    return chatsDeleted;
-  } catch (error) {
-    throw new ChatSDKError(
-      'bad_request:database',
-      'Failed to delete chat by id',
-    );
-  }
-}
-
-export async function getChatsByUserId({
-  id,
-  limit,
-  startingAfter,
-  endingBefore,
-}: {
-  id: string;
-  limit: number;
-  startingAfter: string | null;
-  endingBefore: string | null;
-}) {
-  try {
-    const extendedLimit = limit + 1;
-
-    const query = (whereCondition?: SQL<any>) =>
-      db
-        .select()
-        .from(chat)
-        .where(
-          whereCondition
-            ? and(whereCondition, eq(chat.userId, id))
-            : eq(chat.userId, id),
-        )
-        .orderBy(desc(chat.createdAt))
-        .limit(extendedLimit);
-
-    let filteredChats: Array<Chat> = [];
-
-    if (startingAfter) {
-      const [selectedChat] = await db
-        .select()
-        .from(chat)
-        .where(eq(chat.id, startingAfter))
-        .limit(1);
-
-      if (!selectedChat) {
-        throw new ChatSDKError(
-          'not_found:database',
-          `Chat with id ${startingAfter} not found`,
-        );
-      }
-
-      filteredChats = await query(gt(chat.createdAt, selectedChat.createdAt));
-    } else if (endingBefore) {
-      const [selectedChat] = await db
-        .select()
-        .from(chat)
-        .where(eq(chat.id, endingBefore))
-        .limit(1);
-
-      if (!selectedChat) {
-        throw new ChatSDKError(
-          'not_found:database',
-          `Chat with id ${endingBefore} not found`,
-        );
-      }
-
-      filteredChats = await query(lt(chat.createdAt, selectedChat.createdAt));
-    } else {
-      filteredChats = await query();
-    }
-
-    const hasMore = filteredChats.length > limit;
-
-    return {
-      chats: hasMore ? filteredChats.slice(0, limit) : filteredChats,
-      hasMore,
-    };
-  } catch (error) {
-    throw new ChatSDKError(
-      'bad_request:database',
-      'Failed to get chats by user id',
-    );
   }
 }
 
@@ -465,37 +324,6 @@ export async function updateChatVisiblityById({
     throw new ChatSDKError(
       'bad_request:database',
       'Failed to update chat visibility by id',
-    );
-  }
-}
-
-export async function getMessageCountByUserId({
-  id,
-  differenceInHours,
-}: { id: string; differenceInHours: number }) {
-  try {
-    const twentyFourHoursAgo = new Date(
-      Date.now() - differenceInHours * 60 * 60 * 1000,
-    );
-
-    const [stats] = await db
-      .select({ count: count(message.id) })
-      .from(message)
-      .innerJoin(chat, eq(message.chatId, chat.id))
-      .where(
-        and(
-          eq(chat.userId, id),
-          gte(message.createdAt, twentyFourHoursAgo),
-          eq(message.role, 'user'),
-        ),
-      )
-      .execute();
-
-    return stats?.count ?? 0;
-  } catch (error) {
-    throw new ChatSDKError(
-      'bad_request:database',
-      'Failed to get message count by user id',
     );
   }
 }
