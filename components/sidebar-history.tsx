@@ -1,365 +1,428 @@
-'use client';
+import 'server-only';
+import dbConnect from './mongodb';
+import { 
+  ChatModel, 
+  MessageModel, 
+  VoteModel, 
+  DocumentModel, 
+  SuggestionModel, 
+  StreamModel,
+  type Chat,
+  type DBMessage,
+  type Document,
+  type Suggestion,
+  type Vote
+} from './schema';
+import type { ArtifactKind } from '@/components/artifact';
+import type { VisibilityType } from '@/components/visibility-selector';
+import { ChatSDKError } from '../errors';
 
-import { isToday, isYesterday, subMonths, subWeeks } from 'date-fns';
-import { useParams, useRouter } from 'next/navigation';
-import type { User } from 'next-auth';
-import { useState } from 'react';
-import { toast } from 'sonner';
-import { motion } from 'framer-motion';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
-import {
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarMenu,
-  useSidebar,
-} from '@/components/ui/sidebar';
-import type { Chat } from '@/lib/db/schema';
-import { fetcher } from '@/lib/utils';
-import { ChatItem } from './sidebar-history-item';
-import useSWRInfinite from 'swr/infinite';
-import { LoaderIcon } from './icons';
-
-type GroupedChats = {
-  today: Chat[];
-  yesterday: Chat[];
-  lastWeek: Chat[];
-  lastMonth: Chat[];
-  older: Chat[];
-};
-
-export interface ChatHistory {
-  chats: Array<Chat>;
-  hasMore: boolean;
+export async function saveChat({
+  id,
+  userId,
+  title,
+  visibility,
+}: {
+  id: string;
+  userId: string;
+  title: string;
+  visibility: VisibilityType;
+}) {
+  try {
+    await dbConnect();
+    const newChat = new ChatModel({
+      id,
+      userId,
+      title,
+      visibility,
+      createdAt: new Date()
+    });
+    return await newChat.save();
+  } catch (error) {
+    console.error('Failed to save chat', error);
+    throw error;
+  }
 }
 
-const PAGE_SIZE = 20;
+export async function getChatById({ id }: { id: string }) {
+  try {
+    await dbConnect();
+    return await ChatModel.findOne({ id }).lean();
+  } catch (error) {
+    console.error('Failed to get chat by id', error);
+    throw error;
+  }
+}
 
-const groupChatsByDate = (chats: Chat[]): GroupedChats => {
-  const now = new Date();
-  const oneWeekAgo = subWeeks(now, 1);
-  const oneMonthAgo = subMonths(now, 1);
-
-  return chats.reduce(
-    (groups, chat) => {
-      const chatDate = new Date(chat.createdAt);
-
-      if (isToday(chatDate)) {
-        groups.today.push(chat);
-      } else if (isYesterday(chatDate)) {
-        groups.yesterday.push(chat);
-      } else if (chatDate > oneWeekAgo) {
-        groups.lastWeek.push(chat);
-      } else if (chatDate > oneMonthAgo) {
-        groups.lastMonth.push(chat);
-      } else {
-        groups.older.push(chat);
+export async function getChatsByUserId({
+  id,
+  limit = 10,
+  startingAfter,
+  endingBefore,
+}: {
+  id: string;
+  limit?: number;
+  startingAfter?: string | null;
+  endingBefore?: string | null;
+}) {
+  try {
+    await dbConnect();
+    
+    let query = ChatModel.find({ userId: id });
+    
+    if (startingAfter) {
+      const startingChat = await ChatModel.findOne({ id: startingAfter }).lean();
+      if (startingChat) {
+        query = query.where('createdAt').lt(startingChat.createdAt);
       }
-
-      return groups;
-    },
-    {
-      today: [],
-      yesterday: [],
-      lastWeek: [],
-      lastMonth: [],
-      older: [],
-    } as GroupedChats,
-  );
-};
-
-export function getChatHistoryPaginationKey(
-  pageIndex: number,
-  previousPageData: ChatHistory,
-) {
-  if (previousPageData && previousPageData.hasMore === false) {
-    return null;
+    } else if (endingBefore) {
+      const endingChat = await ChatModel.findOne({ id: endingBefore }).lean();
+      if (endingChat) {
+        query = query.where('createdAt').gt(endingChat.createdAt);
+      }
+    }
+    
+    const chats = await query
+      .sort({ createdAt: -1 })
+      .limit(limit + 1)
+      .lean();
+    
+    const hasMore = chats.length > limit;
+    
+    if (hasMore) {
+      chats.pop();
+    }
+    
+    return {
+      chats,
+      hasMore
+    };
+  } catch (error) {
+    console.error('Failed to get chats by user id', error);
+    throw error;
   }
-
-  if (pageIndex === 0) return `/api/history?limit=${PAGE_SIZE}`;
-
-  const firstChatFromPage = previousPageData.chats.at(-1);
-
-  if (!firstChatFromPage) return null;
-
-  return `/api/history?ending_before=${firstChatFromPage.id}&limit=${PAGE_SIZE}`;
 }
 
-export function SidebarHistory({ user }: { user: User | undefined }) {
-  const { setOpenMobile } = useSidebar();
-  const { id } = useParams();
+export async function saveMessages({
+  messages: messagesToSave,
+}: {
+  messages: Array<DBMessage>;
+}) {
+  try {
+    await dbConnect();
+    return await MessageModel.insertMany(messagesToSave);
+  } catch (error) {
+    console.error('Failed to save messages', error);
+    throw error;
+  }
+}
 
-  const {
-    data: paginatedChatHistories,
-    setSize,
-    isValidating,
-    isLoading,
-    mutate,
-  } = useSWRInfinite<ChatHistory>(getChatHistoryPaginationKey, fetcher, {
-    fallbackData: [],
-  });
+export async function getMessagesByChatId({ id }: { id: string }) {
+  try {
+    await dbConnect();
+    return await MessageModel.find({ chatId: id }).sort({ createdAt: 1 }).lean();
+  } catch (error) {
+    console.error('Failed to get messages by chat id', error);
+    throw error;
+  }
+}
 
-  const router = useRouter();
-  const [deleteId, setDeleteId] = useState<string | null>(null);
-  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
-
-  const hasReachedEnd = paginatedChatHistories
-    ? paginatedChatHistories.some((page) => page.hasMore === false)
-    : false;
-
-  const hasEmptyChatHistory = paginatedChatHistories
-    ? paginatedChatHistories.every((page) => page.chats.length === 0)
-    : false;
-
-  const handleDelete = async () => {
-    const deletePromise = fetch(`/api/chat?id=${deleteId}`, {
-      method: 'DELETE',
+export async function getMessageCountByUserId({
+  id,
+  differenceInHours = 24,
+}: {
+  id: string;
+  differenceInHours?: number;
+}) {
+  try {
+    await dbConnect();
+    const date = new Date();
+    date.setHours(date.getHours() - differenceInHours);
+    
+    return await MessageModel.countDocuments({
+      userId: id,
+      createdAt: { $gte: date }
     });
+  } catch (error) {
+    console.error('Failed to get message count by user id', error);
+    throw error;
+  }
+}
 
-    toast.promise(deletePromise, {
-      loading: 'Deleting chat...',
-      success: () => {
-        mutate((chatHistories) => {
-          if (chatHistories) {
-            return chatHistories.map((chatHistory) => ({
-              ...chatHistory,
-              chats: chatHistory.chats.filter((chat) => chat.id !== deleteId),
-            }));
-          }
-        });
-
-        return 'Chat deleted successfully';
-      },
-      error: 'Failed to delete chat',
-    });
-
-    setShowDeleteDialog(false);
-
-    if (deleteId === id) {
-      router.push('/');
+export async function voteMessage({
+  chatId,
+  messageId,
+  type,
+}: {
+  chatId: string;
+  messageId: string;
+  type: 'up' | 'down';
+}) {
+  try {
+    await dbConnect();
+    const existingVote = await VoteModel.findOne({ chatId, messageId });
+    
+    if (existingVote) {
+      existingVote.isUpvoted = type === 'up';
+      return await existingVote.save();
     }
-  };
-
-  if (!user) {
-    return (
-      <SidebarGroup>
-        <SidebarGroupContent>
-          <div className="px-2 text-zinc-500 w-full flex flex-row justify-center items-center text-sm gap-2">
-            Login to save and revisit previous chats!
-          </div>
-        </SidebarGroupContent>
-      </SidebarGroup>
-    );
+    
+    const newVote = new VoteModel({
+      chatId,
+      messageId,
+      isUpvoted: type === 'up'
+    });
+    
+    return await newVote.save();
+  } catch (error) {
+    console.error('Failed to vote message', error);
+    throw error;
   }
+}
 
-  if (isLoading) {
-    return (
-      <SidebarGroup>
-        <div className="px-2 py-1 text-xs text-sidebar-foreground/50">
-          Today
-        </div>
-        <SidebarGroupContent>
-          <div className="flex flex-col">
-            {[44, 32, 28, 64, 52].map((item) => (
-              <div
-                key={item}
-                className="rounded-md h-8 flex gap-2 px-2 items-center"
-              >
-                <div
-                  className="h-4 rounded-md flex-1 max-w-[--skeleton-width] bg-sidebar-accent-foreground/10"
-                  style={
-                    {
-                      '--skeleton-width': `${item}%`,
-                    } as React.CSSProperties
-                  }
-                />
-              </div>
-            ))}
-          </div>
-        </SidebarGroupContent>
-      </SidebarGroup>
-    );
+export async function getVotesByChatId({ id }: { id: string }) {
+  try {
+    await dbConnect();
+    return await VoteModel.find({ chatId: id }).lean();
+  } catch (error) {
+    console.error('Failed to get votes by chat id', error);
+    throw error;
   }
+}
 
-  if (hasEmptyChatHistory) {
-    return (
-      <SidebarGroup>
-        <SidebarGroupContent>
-          <div className="px-2 text-zinc-500 w-full flex flex-row justify-center items-center text-sm gap-2">
-            Your conversations will appear here once you start chatting!
-          </div>
-        </SidebarGroupContent>
-      </SidebarGroup>
-    );
+export async function saveDocument({
+  id,
+  title,
+  kind,
+  content,
+  userId,
+}: {
+  id: string;
+  title: string;
+  kind: ArtifactKind;
+  content: string;
+  userId: string;
+}) {
+  try {
+    await dbConnect();
+    const newDocument = new DocumentModel({
+      id,
+      title,
+      kind,
+      content,
+      userId,
+      createdAt: new Date()
+    });
+    
+    return [await newDocument.save()];
+  } catch (error) {
+    console.error('Failed to save document', error);
+    throw error;
   }
+}
 
-  return (
-    <>
-      <SidebarGroup>
-        <SidebarGroupContent>
-          <SidebarMenu>
-            {paginatedChatHistories &&
-              (() => {
-                const chatsFromHistory = paginatedChatHistories.flatMap(
-                  (paginatedChatHistory) => paginatedChatHistory.chats,
-                );
+export async function getDocumentsById({ id }: { id: string }) {
+  try {
+    await dbConnect();
+    return await DocumentModel.find({ id }).sort({ createdAt: 1 }).lean();
+  } catch (error) {
+    console.error('Failed to get documents by id', error);
+    throw error;
+  }
+}
 
-                const groupedChats = groupChatsByDate(chatsFromHistory);
+export async function getDocumentById({ id }: { id: string }) {
+  try {
+    await dbConnect();
+    return await DocumentModel.findOne({ id }).sort({ createdAt: -1 }).lean();
+  } catch (error) {
+    console.error('Failed to get document by id', error);
+    throw error;
+  }
+}
 
-                return (
-                  <div className="flex flex-col gap-6">
-                    {groupedChats.today.length > 0 && (
-                      <div>
-                        <div className="px-2 py-1 text-xs text-sidebar-foreground/50">
-                          Today
-                        </div>
-                        {groupedChats.today.map((chat) => (
-                          <ChatItem
-                            key={chat.id}
-                            chat={chat}
-                            isActive={chat.id === id}
-                            onDelete={(chatId) => {
-                              setDeleteId(chatId);
-                              setShowDeleteDialog(true);
-                            }}
-                            setOpenMobile={setOpenMobile}
-                          />
-                        ))}
-                      </div>
-                    )}
+export async function deleteDocumentsByIdAfterTimestamp({
+  id,
+  timestamp,
+}: {
+  id: string;
+  timestamp: Date;
+}) {
+  try {
+    await dbConnect();
+    
+    // Delete related suggestions
+    await SuggestionModel.deleteMany({
+      documentId: id,
+      documentCreatedAt: { $gt: timestamp }
+    });
+    
+    // Delete documents and return them
+    const deletedDocs = await DocumentModel.find({
+      id,
+      createdAt: { $gt: timestamp }
+    }).lean();
+    
+    await DocumentModel.deleteMany({
+      id,
+      createdAt: { $gt: timestamp }
+    });
+    
+    return deletedDocs;
+  } catch (error) {
+    console.error('Failed to delete documents by id after timestamp', error);
+    throw error;
+  }
+}
 
-                    {groupedChats.yesterday.length > 0 && (
-                      <div>
-                        <div className="px-2 py-1 text-xs text-sidebar-foreground/50">
-                          Yesterday
-                        </div>
-                        {groupedChats.yesterday.map((chat) => (
-                          <ChatItem
-                            key={chat.id}
-                            chat={chat}
-                            isActive={chat.id === id}
-                            onDelete={(chatId) => {
-                              setDeleteId(chatId);
-                              setShowDeleteDialog(true);
-                            }}
-                            setOpenMobile={setOpenMobile}
-                          />
-                        ))}
-                      </div>
-                    )}
+export async function saveSuggestions({
+  suggestions,
+}: {
+  suggestions: Array<Suggestion>;
+}) {
+  try {
+    await dbConnect();
+    return await SuggestionModel.insertMany(suggestions);
+  } catch (error) {
+    console.error('Failed to save suggestions', error);
+    throw error;
+  }
+}
 
-                    {groupedChats.lastWeek.length > 0 && (
-                      <div>
-                        <div className="px-2 py-1 text-xs text-sidebar-foreground/50">
-                          Last 7 days
-                        </div>
-                        {groupedChats.lastWeek.map((chat) => (
-                          <ChatItem
-                            key={chat.id}
-                            chat={chat}
-                            isActive={chat.id === id}
-                            onDelete={(chatId) => {
-                              setDeleteId(chatId);
-                              setShowDeleteDialog(true);
-                            }}
-                            setOpenMobile={setOpenMobile}
-                          />
-                        ))}
-                      </div>
-                    )}
+export async function getSuggestionsByDocumentId({
+  documentId,
+}: {
+  documentId: string;
+}) {
+  try {
+    await dbConnect();
+    return await SuggestionModel.find({ documentId }).lean();
+  } catch (error) {
+    console.error('Failed to get suggestions by document id', error);
+    throw error;
+  }
+}
 
-                    {groupedChats.lastMonth.length > 0 && (
-                      <div>
-                        <div className="px-2 py-1 text-xs text-sidebar-foreground/50">
-                          Last 30 days
-                        </div>
-                        {groupedChats.lastMonth.map((chat) => (
-                          <ChatItem
-                            key={chat.id}
-                            chat={chat}
-                            isActive={chat.id === id}
-                            onDelete={(chatId) => {
-                              setDeleteId(chatId);
-                              setShowDeleteDialog(true);
-                            }}
-                            setOpenMobile={setOpenMobile}
-                          />
-                        ))}
-                      </div>
-                    )}
+export async function getMessageById({ id }: { id: string }) {
+  try {
+    await dbConnect();
+    return await MessageModel.findOne({ id }).lean();
+  } catch (error) {
+    console.error('Failed to get message by id', error);
+    throw error;
+  }
+}
 
-                    {groupedChats.older.length > 0 && (
-                      <div>
-                        <div className="px-2 py-1 text-xs text-sidebar-foreground/50">
-                          Older than last month
-                        </div>
-                        {groupedChats.older.map((chat) => (
-                          <ChatItem
-                            key={chat.id}
-                            chat={chat}
-                            isActive={chat.id === id}
-                            onDelete={(chatId) => {
-                              setDeleteId(chatId);
-                              setShowDeleteDialog(true);
-                            }}
-                            setOpenMobile={setOpenMobile}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-          </SidebarMenu>
+export async function deleteMessagesByChatIdAfterTimestamp({
+  chatId,
+  timestamp,
+}: {
+  chatId: string;
+  timestamp: Date;
+}) {
+  try {
+    await dbConnect();
+    
+    // Find messages to delete
+    const messagesToDelete = await MessageModel.find({
+      chatId,
+      createdAt: { $gte: timestamp }
+    }).lean();
+    
+    const messageIds = messagesToDelete.map(message => message.id);
+    
+    if (messageIds.length > 0) {
+      // Delete related votes
+      await VoteModel.deleteMany({
+        chatId,
+        messageId: { $in: messageIds }
+      });
+      
+      // Delete messages
+      return await MessageModel.deleteMany({
+        chatId,
+        id: { $in: messageIds }
+      });
+    }
+  } catch (error) {
+    console.error('Failed to delete messages by chat id after timestamp', error);
+    throw error;
+  }
+}
 
-          <motion.div
-            onViewportEnter={() => {
-              if (!isValidating && !hasReachedEnd) {
-                setSize((size) => size + 1);
-              }
-            }}
-          />
+export async function deleteChatById({ id }: { id: string }) {
+  try {
+    await dbConnect();
+    
+    // Delete related votes
+    await VoteModel.deleteMany({ chatId: id });
+    
+    // Delete related messages
+    await MessageModel.deleteMany({ chatId: id });
+    
+    // Delete related streams
+    await StreamModel.deleteMany({ chatId: id });
+    
+    // Delete and return the chat
+    const deletedChat = await ChatModel.findOneAndDelete({ id }).lean();
+    return deletedChat;
+  } catch (error) {
+    console.error('Failed to delete chat by id', error);
+    throw error;
+  }
+}
 
-          {hasReachedEnd ? (
-            <div className="px-2 text-zinc-500 w-full flex flex-row justify-center items-center text-sm gap-2 mt-8">
-              You have reached the end of your chat history.
-            </div>
-          ) : (
-            <div className="p-2 text-zinc-500 dark:text-zinc-400 flex flex-row gap-2 items-center mt-8">
-              <div className="animate-spin">
-                <LoaderIcon />
-              </div>
-              <div>Loading Chats...</div>
-            </div>
-          )}
-        </SidebarGroupContent>
-      </SidebarGroup>
+export async function updateChatVisiblityById({
+  chatId,
+  visibility,
+}: {
+  chatId: string;
+  visibility: 'private' | 'public';
+}) {
+  try {
+    await dbConnect();
+    return await ChatModel.updateOne(
+      { id: chatId },
+      { $set: { visibility } }
+    );
+  } catch (error) {
+    console.error('Failed to update chat visibility by id', error);
+    throw error;
+  }
+}
 
-      <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This action cannot be undone. This will permanently delete your
-              chat and remove it from our servers.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete}>
-              Continue
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </>
-  );
+export async function createStreamId({
+  streamId,
+  chatId,
+}: {
+  streamId: string;
+  chatId: string;
+}) {
+  try {
+    await dbConnect();
+    const newStream = new StreamModel({
+      id: streamId,
+      chatId,
+      createdAt: new Date()
+    });
+    
+    await newStream.save();
+  } catch (error) {
+    console.error('Failed to create stream id', error);
+    throw error;
+  }
+}
+
+export async function getStreamIdsByChatId({ chatId }: { chatId: string }) {
+  try {
+    await dbConnect();
+    const streams = await StreamModel.find({ chatId })
+      .sort({ createdAt: 1 })
+      .lean();
+    
+    return streams.map(stream => stream.id);
+  } catch (error) {
+    console.error('Failed to get stream ids by chat id', error);
+    throw error;
+  }
 }
