@@ -5,9 +5,9 @@ import { getMessagesByChatId } from '@/lib/db/queries';
 import { DataStreamHandler } from '@/components/data-stream-handler';
 import { DEFAULT_CHAT_MODEL } from '@/lib/ai/models';
 import { convertToUIMessages } from '@/lib/utils';
+import { DataStreamProvider } from '@/components/data-stream-provider';
 
-export default async function Page(props: { params: Promise<{ id: string }> }) {
-  const params = await props.params;
+export default async function Page({ params }: { params: { id: string } }) {
   const { id } = params;
   
   const messagesFromDb = await getMessagesByChatId({
@@ -21,7 +21,7 @@ export default async function Page(props: { params: Promise<{ id: string }> }) {
   const uiMessages = convertToUIMessages(messagesFromDb);
 
   return (
-    <>
+    <DataStreamProvider>
       <Chat
         id={id}
         initialMessages={uiMessages}
@@ -31,6 +31,6 @@ export default async function Page(props: { params: Promise<{ id: string }> }) {
         autoResume={true}
       />
       <DataStreamHandler />
-    </>
+    </DataStreamProvider>
   );
 }
