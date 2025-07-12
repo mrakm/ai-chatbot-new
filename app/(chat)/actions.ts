@@ -1,6 +1,6 @@
 'use server';
 
-import { updateChatVisiblityById } from '@/lib/db/queries';
+import { updateChatVisiblityById, getMessageById, deleteMessagesByChatIdAfterTimestamp } from '@/lib/db/queries';
 import type { VisibilityType } from '@/components/visibility-selector';
 
 export async function updateChatVisibility({
@@ -11,4 +11,19 @@ export async function updateChatVisibility({
   visibility: VisibilityType;
 }) {
   await updateChatVisiblityById({ chatId, visibility });
+}
+
+export async function deleteTrailingMessages({
+  id,
+}: {
+  id: string;
+}) {
+  const message = await getMessageById({ id });
+  
+  if (message) {
+    await deleteMessagesByChatIdAfterTimestamp({
+      chatId: message.chatId,
+      timestamp: message.createdAt,
+    });
+  }
 }
