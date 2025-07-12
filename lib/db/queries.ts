@@ -1,38 +1,21 @@
 import 'server-only';
-
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  gt,
-  gte,
-  inArray,
-  lt,
-  type SQL,
-} from 'drizzle-orm';
-import { drizzle } from 'drizzle-orm/postgres-js';
-import postgres from 'postgres';
-
-import {
-  chat,
-  document,
-  type Suggestion,
-  suggestion,
-  messages,
-  vote,
-  type DBMessage,
+import dbConnect from './mongodb';
+import { 
+  ChatModel, 
+  MessageModel, 
+  VoteModel, 
+  DocumentModel, 
+  SuggestionModel, 
+  StreamModel,
   type Chat,
-  stream,
+  type DBMessage,
+  type Document,
+  type Suggestion,
+  type Vote
 } from './schema';
 import type { ArtifactKind } from '@/components/artifact';
-import { generateUUID } from '../utils';
 import type { VisibilityType } from '@/components/visibility-selector';
 import { ChatSDKError } from '../errors';
-
-// biome-ignore lint: Forbidden non-null assertion.
-const client = postgres(process.env.POSTGRES_URL!);
-const db = drizzle(client);
 
 export async function saveChat({
   id,
@@ -46,13 +29,15 @@ export async function saveChat({
   visibility: VisibilityType;
 }) {
   try {
-    return await db.insert(chat).values({
+    await dbConnect();
+    const newChat = new ChatModel({
       id,
-      createdAt: new Date(),
       userId,
       title,
       visibility,
+      createdAt: new Date()
     });
+    return await newChat.save();
   } catch (error) {
     console.error('Failed to save chat', error);
     throw error;
@@ -61,10 +46,59 @@ export async function saveChat({
 
 export async function getChatById({ id }: { id: string }) {
   try {
-    const [selectedChat] = await db.select().from(chat).where(eq(chat.id, id));
-    return selectedChat;
+    await dbConnect();
+    return await ChatModel.findOne({ id }).lean();
   } catch (error) {
     console.error('Failed to get chat by id', error);
+    throw error;
+  }
+}
+
+export async function getChatsByUserId({
+  id,
+  limit = 10,
+  startingAfter,
+  endingBefore,
+}: {
+  id: string;
+  limit?: number;
+  startingAfter?: string | null;
+  endingBefore?: string | null;
+}) {
+  try {
+    await dbConnect();
+    
+    let query = ChatModel.find({ userId: id });
+    
+    if (startingAfter) {
+      const startingChat = await ChatModel.findOne({ id: startingAfter }).lean();
+      if (startingChat) {
+        query = query.where('createdAt').lt(startingChat.createdAt);
+      }
+    } else if (endingBefore) {
+      const endingChat = await ChatModel.findOne({ id: endingBefore }).lean();
+      if (endingChat) {
+        query = query.where('createdAt').gt(endingChat.createdAt);
+      }
+    }
+    
+    const chats = await query
+      .sort({ createdAt: -1 })
+      .limit(limit + 1)
+      .lean();
+    
+    const hasMore = chats.length > limit;
+    
+    if (hasMore) {
+      chats.pop();
+    }
+    
+    return {
+      chats,
+      hasMore
+    };
+  } catch (error) {
+    console.error('Failed to get chats by user id', error);
     throw error;
   }
 }
@@ -75,7 +109,8 @@ export async function saveMessages({
   messages: Array<DBMessage>;
 }) {
   try {
-    return await db.insert(messages).values(messagesToSave);
+    await dbConnect();
+    return await MessageModel.insertMany(messagesToSave);
   } catch (error) {
     console.error('Failed to save messages', error);
     throw error;
@@ -84,13 +119,32 @@ export async function saveMessages({
 
 export async function getMessagesByChatId({ id }: { id: string }) {
   try {
-    return await db
-      .select()
-      .from(messages)
-      .where(eq(messages.chatId, id))
-      .orderBy(asc(messages.createdAt));
+    await dbConnect();
+    return await MessageModel.find({ chatId: id }).sort({ createdAt: 1 }).lean();
   } catch (error) {
     console.error('Failed to get messages by chat id', error);
+    throw error;
+  }
+}
+
+export async function getMessageCountByUserId({
+  id,
+  differenceInHours = 24,
+}: {
+  id: string;
+  differenceInHours?: number;
+}) {
+  try {
+    await dbConnect();
+    const date = new Date();
+    date.setHours(date.getHours() - differenceInHours);
+    
+    return await MessageModel.countDocuments({
+      userId: id,
+      createdAt: { $gte: date }
+    });
+  } catch (error) {
+    console.error('Failed to get message count by user id', error);
     throw error;
   }
 }
@@ -105,22 +159,21 @@ export async function voteMessage({
   type: 'up' | 'down';
 }) {
   try {
-    const [existingVote] = await db
-      .select()
-      .from(vote)
-      .where(and(eq(vote.messageId, messageId)));
-
+    await dbConnect();
+    const existingVote = await VoteModel.findOne({ chatId, messageId });
+    
     if (existingVote) {
-      return await db
-        .update(vote)
-        .set({ isUpvoted: type === 'up' })
-        .where(and(eq(vote.messageId, messageId), eq(vote.chatId, chatId)));
+      existingVote.isUpvoted = type === 'up';
+      return await existingVote.save();
     }
-    return await db.insert(vote).values({
+    
+    const newVote = new VoteModel({
       chatId,
       messageId,
-      isUpvoted: type === 'up',
+      isUpvoted: type === 'up'
     });
+    
+    return await newVote.save();
   } catch (error) {
     console.error('Failed to vote message', error);
     throw error;
@@ -129,7 +182,8 @@ export async function voteMessage({
 
 export async function getVotesByChatId({ id }: { id: string }) {
   try {
-    return await db.select().from(vote).where(eq(vote.chatId, id));
+    await dbConnect();
+    return await VoteModel.find({ chatId: id }).lean();
   } catch (error) {
     console.error('Failed to get votes by chat id', error);
     throw error;
@@ -150,17 +204,17 @@ export async function saveDocument({
   userId: string;
 }) {
   try {
-    return await db
-      .insert(document)
-      .values({
-        id,
-        title,
-        kind,
-        content,
-        userId,
-        createdAt: new Date(),
-      })
-      .returning();
+    await dbConnect();
+    const newDocument = new DocumentModel({
+      id,
+      title,
+      kind,
+      content,
+      userId,
+      createdAt: new Date()
+    });
+    
+    return [await newDocument.save()];
   } catch (error) {
     console.error('Failed to save document', error);
     throw error;
@@ -169,13 +223,8 @@ export async function saveDocument({
 
 export async function getDocumentsById({ id }: { id: string }) {
   try {
-    const documents = await db
-      .select()
-      .from(document)
-      .where(eq(document.id, id))
-      .orderBy(asc(document.createdAt));
-
-    return documents;
+    await dbConnect();
+    return await DocumentModel.find({ id }).sort({ createdAt: 1 }).lean();
   } catch (error) {
     console.error('Failed to get documents by id', error);
     throw error;
@@ -184,13 +233,8 @@ export async function getDocumentsById({ id }: { id: string }) {
 
 export async function getDocumentById({ id }: { id: string }) {
   try {
-    const [selectedDocument] = await db
-      .select()
-      .from(document)
-      .where(eq(document.id, id))
-      .orderBy(desc(document.createdAt));
-
-    return selectedDocument;
+    await dbConnect();
+    return await DocumentModel.findOne({ id }).sort({ createdAt: -1 }).lean();
   } catch (error) {
     console.error('Failed to get document by id', error);
     throw error;
@@ -205,19 +249,26 @@ export async function deleteDocumentsByIdAfterTimestamp({
   timestamp: Date;
 }) {
   try {
-    await db
-      .delete(suggestion)
-      .where(
-        and(
-          eq(suggestion.documentId, id),
-          gt(suggestion.documentCreatedAt, timestamp),
-        ),
-      );
-
-    return await db
-      .delete(document)
-      .where(and(eq(document.id, id), gt(document.createdAt, timestamp)))
-      .returning();
+    await dbConnect();
+    
+    // Delete related suggestions
+    await SuggestionModel.deleteMany({
+      documentId: id,
+      documentCreatedAt: { $gt: timestamp }
+    });
+    
+    // Delete documents and return them
+    const deletedDocs = await DocumentModel.find({
+      id,
+      createdAt: { $gt: timestamp }
+    }).lean();
+    
+    await DocumentModel.deleteMany({
+      id,
+      createdAt: { $gt: timestamp }
+    });
+    
+    return deletedDocs;
   } catch (error) {
     console.error('Failed to delete documents by id after timestamp', error);
     throw error;
@@ -230,7 +281,8 @@ export async function saveSuggestions({
   suggestions: Array<Suggestion>;
 }) {
   try {
-    return await db.insert(suggestion).values(suggestions);
+    await dbConnect();
+    return await SuggestionModel.insertMany(suggestions);
   } catch (error) {
     console.error('Failed to save suggestions', error);
     throw error;
@@ -243,10 +295,8 @@ export async function getSuggestionsByDocumentId({
   documentId: string;
 }) {
   try {
-    return await db
-      .select()
-      .from(suggestion)
-      .where(and(eq(suggestion.documentId, documentId)));
+    await dbConnect();
+    return await SuggestionModel.find({ documentId }).lean();
   } catch (error) {
     console.error('Failed to get suggestions by document id', error);
     throw error;
@@ -255,13 +305,8 @@ export async function getSuggestionsByDocumentId({
 
 export async function getMessageById({ id }: { id: string }) {
   try {
-    const [message] = await db
-      .select()
-      .from(messages)
-      .where(eq(messages.id, id))
-      .limit(1);
-
-    return message;
+    await dbConnect();
+    return await MessageModel.findOne({ id }).lean();
   } catch (error) {
     console.error('Failed to get message by id', error);
     throw error;
@@ -276,30 +321,53 @@ export async function deleteMessagesByChatIdAfterTimestamp({
   timestamp: Date;
 }) {
   try {
-    const messagesToDelete = await db
-      .select({ id: messages.id })
-      .from(messages)
-      .where(
-        and(eq(messages.chatId, chatId), gte(messages.createdAt, timestamp)),
-      );
-
-    const messageIds = messagesToDelete.map((message) => message.id);
-
+    await dbConnect();
+    
+    // Find messages to delete
+    const messagesToDelete = await MessageModel.find({
+      chatId,
+      createdAt: { $gte: timestamp }
+    }).lean();
+    
+    const messageIds = messagesToDelete.map(message => message.id);
+    
     if (messageIds.length > 0) {
-      await db
-        .delete(vote)
-        .where(
-          and(eq(vote.chatId, chatId), inArray(vote.messageId, messageIds)),
-        );
-
-      return await db
-        .delete(messages)
-        .where(
-          and(eq(messages.chatId, chatId), inArray(messages.id, messageIds)),
-        );
+      // Delete related votes
+      await VoteModel.deleteMany({
+        chatId,
+        messageId: { $in: messageIds }
+      });
+      
+      // Delete messages
+      return await MessageModel.deleteMany({
+        chatId,
+        id: { $in: messageIds }
+      });
     }
   } catch (error) {
     console.error('Failed to delete messages by chat id after timestamp', error);
+    throw error;
+  }
+}
+
+export async function deleteChatById({ id }: { id: string }) {
+  try {
+    await dbConnect();
+    
+    // Delete related votes
+    await VoteModel.deleteMany({ chatId: id });
+    
+    // Delete related messages
+    await MessageModel.deleteMany({ chatId: id });
+    
+    // Delete related streams
+    await StreamModel.deleteMany({ chatId: id });
+    
+    // Delete and return the chat
+    const deletedChat = await ChatModel.findOneAndDelete({ id }).lean();
+    return deletedChat;
+  } catch (error) {
+    console.error('Failed to delete chat by id', error);
     throw error;
   }
 }
@@ -312,7 +380,11 @@ export async function updateChatVisiblityById({
   visibility: 'private' | 'public';
 }) {
   try {
-    return await db.update(chat).set({ visibility }).where(eq(chat.id, chatId));
+    await dbConnect();
+    return await ChatModel.updateOne(
+      { id: chatId },
+      { $set: { visibility } }
+    );
   } catch (error) {
     console.error('Failed to update chat visibility by id', error);
     throw error;
@@ -327,9 +399,14 @@ export async function createStreamId({
   chatId: string;
 }) {
   try {
-    await db
-      .insert(stream)
-      .values({ id: streamId, chatId, createdAt: new Date() });
+    await dbConnect();
+    const newStream = new StreamModel({
+      id: streamId,
+      chatId,
+      createdAt: new Date()
+    });
+    
+    await newStream.save();
   } catch (error) {
     console.error('Failed to create stream id', error);
     throw error;
@@ -338,14 +415,12 @@ export async function createStreamId({
 
 export async function getStreamIdsByChatId({ chatId }: { chatId: string }) {
   try {
-    const streamIds = await db
-      .select({ id: stream.id })
-      .from(stream)
-      .where(eq(stream.chatId, chatId))
-      .orderBy(asc(stream.createdAt))
-      .execute();
-
-    return streamIds.map(({ id }) => id);
+    await dbConnect();
+    const streams = await StreamModel.find({ chatId })
+      .sort({ createdAt: 1 })
+      .lean();
+    
+    return streams.map(stream => stream.id);
   } catch (error) {
     console.error('Failed to get stream ids by chat id', error);
     throw error;
